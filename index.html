@@ -47,12 +47,23 @@
   header.top .meta { color: var(--text-muted); font-size: 12.5px; margin-top: 8px; }
   header.top .tip-line { color: var(--series-1); font-size: 12.5px; margin-top: 6px; font-weight: 600; }
 
-  nav.tabs { display:flex; gap:4px; flex-wrap: wrap; align-items:flex-start; margin-bottom: 22px; position: sticky; top:0; background: var(--page-plane);
+  nav.tabs { display:flex; gap:4px; flex-wrap: wrap; align-items:flex-start; margin-bottom: 0; position: sticky; top:0; background: var(--page-plane);
     padding: 10px 0 8px; z-index: 10; border-bottom: 1px solid var(--border);}
   nav.tabs button { border:none; background: transparent; color: var(--text-secondary); font-size: 13.5px; font-weight:550;
     padding: 8px 14px; border-radius: 8px; cursor:pointer; font-family:inherit; }
   nav.tabs button:hover { background: rgba(11,11,11,0.05); color: var(--text-primary); }
   nav.tabs button.active { background: var(--series-1); color: white; }
+
+  .filter-bar { display:flex; align-items:center; gap:20px; flex-wrap:wrap; padding: 12px 2px 16px; border-bottom:1px solid var(--border); margin-bottom: 22px; }
+  .filter-group { display:flex; align-items:center; gap:8px; }
+  .filter-label { font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; }
+  .filter-bar .seg { display:inline-flex; background:var(--page-plane); border:1px solid var(--border); border-radius:8px; padding:2px; gap:2px; }
+  .filter-bar .seg button { border:none; background:transparent; padding:5px 12px; border-radius:6px; font-size:12.5px; font-weight:600; cursor:pointer; color:var(--text-secondary); font-family:inherit; }
+  .filter-bar .seg button.active { background:var(--series-1); color:white; }
+  .filter-bar select { font-size:12.5px; padding:5px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface-1); color:var(--text-primary); font-family:inherit; cursor:pointer; }
+  .filter-reset-btn { font-size:12px; color:var(--series-1); background:none; border:none; cursor:pointer; font-family:inherit; text-decoration:underline; padding:4px 0; }
+  .filter-summary { margin-left:auto; font-size:12.5px; color:var(--text-muted); font-weight:600; white-space:nowrap; }
+  @media (max-width:900px){ .filter-summary { margin-left:0; width:100%; } }
 
   section.panel { display:none; }
   section.panel.active { display:block; animation: fadein .15s ease; }
@@ -219,6 +230,25 @@
   </header>
 
   <nav class="tabs" id="tabs"></nav>
+
+  <div class="filter-bar" id="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">Type</span>
+      <div class="seg" id="filter-type">
+        <button data-v="all" class="active">All</button>
+        <button data-v="Bug">Bugs</button>
+        <button data-v="Task">Tasks</button>
+      </div>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Months</span>
+      <select id="filter-from"></select>
+      <span style="color:var(--text-muted)">–</span>
+      <select id="filter-to"></select>
+    </div>
+    <button class="filter-reset-btn" id="filter-reset">Reset filters</button>
+    <div class="filter-summary" id="filter-summary"></div>
+  </div>
 
   <div id="panels"></div>
 
@@ -595,43 +625,132 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   // for those, return the wrapper so every sibling actually gets inserted instead of being silently dropped.
   return d.children.length === 1 ? d.firstChild : d; }
 
+// =========================================================
+// GLOBAL FILTER: ticket type (Bug/Task/All) + month range.
+// Every tab below (except Component Explorer, which always shows the
+// complete dataset) recomputes its own numbers from `filteredTickets()`
+// on every render, so switching the filter changes every chart/table
+// consistently, and every drill-down drawer opens the same filtered set
+// that produced the number you clicked.
+// =========================================================
+const FILTER = { type: 'all', from: D.months[0], to: D.months[D.months.length-1] };
+function typeOk(t){ return FILTER.type==='all' || t.t===FILTER.type; }
+function monthOk(t){ return t.m >= FILTER.from && t.m <= FILTER.to; }
+function filteredTickets(){ return TICKETS.filter(t=> typeOk(t) && monthOk(t)); }
+function monthsInRange(){ return D.months.filter(m=> m>=FILTER.from && m<=FILTER.to); }
+function groupCount(tickets, keyFn){ const m={}; tickets.forEach(t=>{ const k=keyFn(t); if(k==null||k==='') return; m[k]=(m[k]||0)+1; }); return m; }
+function sortedEntries(obj){ return Object.entries(obj).sort((a,b)=>b[1]-a[1]); }
+function filterLabel(){ return `${FILTER.type==='all'?'All types':(FILTER.type==='Bug'?'Bugs only':'Tasks only')} · ${fmtMonth(FILTER.from)}–${fmtMonth(FILTER.to)}`; }
+
+// Shared scenario-reduction math (used by the Overview KPI and the Automation Opportunities tab)
+// so both report the same weighted estimate: each category's ticket count times its assumed
+// reduction %, not just the raw share of tickets those categories represent.
+const SCENARIO_CAT_SET = new Set(['Configuration','Configuration-Tech Dependent','Feature Enabling','DB Level','Knowledge-Gap','Data Request']);
+function computeScenario(FT){
+  const sc = D.scenario;
+  const enablementSet = new Set(['Configuration','Configuration-Tech Dependent','Feature Enabling']);
+  const enablementTotal = FT.filter(t=>enablementSet.has(t.cat)).length;
+  const dbTotal = FT.filter(t=>t.cat==='DB Level').length;
+  const kgapTotal = FT.filter(t=>t.cat==='Knowledge-Gap').length;
+  const datareqTotal = FT.filter(t=>t.cat==='Data Request').length;
+  const enablementReduction = Math.round(enablementTotal*sc.enablement_reduction_pct_assumption/100);
+  const dbReduction = Math.round(dbTotal*sc.dblevel_reduction_pct_assumption/100);
+  const kgapReduction = Math.round(kgapTotal*sc.kgap_reduction_pct_assumption/100);
+  const datareqReduction = Math.round(datareqTotal*sc.datareq_reduction_pct_assumption/100);
+  const totalReduction = enablementReduction+dbReduction+kgapReduction+datareqReduction;
+  return { enablementSet, enablementTotal, dbTotal, kgapTotal, datareqTotal,
+    enablementReduction, dbReduction, kgapReduction, datareqReduction, totalReduction,
+    totalReductionPct: FT.length ? (totalReduction/FT.length*100).toFixed(1) : '0.0' };
+}
+
+const RENDERERS = [];
+function registerRenderer(fn){ RENDERERS.push(fn); }
+function rerenderAll(){ RENDERERS.forEach(fn=>fn()); updateFilterSummary(); }
+function updateFilterSummary(){
+  document.getElementById('filter-summary').textContent = `Showing ${fmtNum(filteredTickets().length)} tickets · ${filterLabel()}`;
+}
+
+const filterFromEl = document.getElementById('filter-from');
+const filterToEl = document.getElementById('filter-to');
+D.months.forEach(m=>{
+  filterFromEl.appendChild(new Option(fmtMonth(m), m));
+  filterToEl.appendChild(new Option(fmtMonth(m), m));
+});
+filterFromEl.value = FILTER.from;
+filterToEl.value = FILTER.to;
+document.querySelectorAll('#filter-type button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('#filter-type button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    FILTER.type = btn.dataset.v;
+    rerenderAll();
+  });
+});
+filterFromEl.addEventListener('change', ()=>{
+  FILTER.from = filterFromEl.value;
+  if (FILTER.from > FILTER.to) { FILTER.to = FILTER.from; filterToEl.value = FILTER.to; }
+  rerenderAll();
+});
+filterToEl.addEventListener('change', ()=>{
+  FILTER.to = filterToEl.value;
+  if (FILTER.to < FILTER.from) { FILTER.from = FILTER.to; filterFromEl.value = FILTER.from; }
+  rerenderAll();
+});
+document.getElementById('filter-reset').addEventListener('click', ()=>{
+  FILTER.type = 'all'; FILTER.from = D.months[0]; FILTER.to = D.months[D.months.length-1];
+  document.querySelectorAll('#filter-type button').forEach(b=>b.classList.toggle('active', b.dataset.v==='all'));
+  filterFromEl.value = FILTER.from; filterToEl.value = FILTER.to;
+  rerenderAll();
+});
+
 // ---------------- OVERVIEW ----------------
-(function(){
-  const p = document.getElementById('panel-overview');
-  const bugTotal = D.bug_vs_task_total['Bug']||0, taskTotal=D.bug_vs_task_total['Task']||0, otherTotal=D.bug_vs_task_total['Other']||0;
-  const top10CatSet = new Set(D.automation_candidates.slice(0,10).map(r=>r.category));
-  const scenarioCatSet = new Set(['Configuration','Configuration-Tech Dependent','Feature Enabling','DB Level','Knowledge-Gap','Data Request']);
+function renderOverview(){
+  const p = document.getElementById('panel-overview'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const bt = btSplit(FT);
+  const monthsList = monthsInRange();
+  const catCounts = groupCount(FT, t=>t.cat);
+  const top10CatSet = new Set(sortedEntries(catCounts).filter(([c])=>!UNCLASSIFIED_CATS.has(c)).slice(0,10).map(([c])=>c));
+  const top10Total = FT.filter(t=>top10CatSet.has(t.cat)).length;
+  const scenario = computeScenario(FT);
+  const uncatBugs = FT.filter(t=>t.cat==='Bug - Uncategorized').length;
+  const uncatTasks = FT.filter(t=>t.cat==='Task - Uncategorized').length;
+
   p.appendChild(el(`<div class="kpi-row">
-    <div class="kpi"><div class="label">Total PST tickets</div><div class="value clickable" onclick="${h(()=>openDrawer('All PST tickets','', TICKETS))}">${fmtNum(D.total_tickets)}</div><div class="sub">Jan–12 Aug 2026</div></div>
-    <div class="kpi"><div class="label">Bugs vs Tasks</div><div class="value"><span class="clickable" onclick="${h(()=>openDrawer('Bugs','All PST bugs', TICKETS.filter(t=>t.t==='Bug')))}">${Math.round(bugTotal/D.total_tickets*100)}%</span> / <span class="clickable" onclick="${h(()=>openDrawer('Tasks','All PST tasks', TICKETS.filter(t=>t.t==='Task')))}">${Math.round(taskTotal/D.total_tickets*100)}%</span></div><div class="sub">${fmtNum(bugTotal)} bugs · ${fmtNum(taskTotal)} tasks</div></div>
-    <div class="kpi"><div class="label">Configuration-related</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration-related tickets','any configuration touchpoint', TICKETS.filter(t=>!!t.cfg)))}">${D.config_pct.toFixed(0)}%</div><div class="sub">${fmtNum(D.config_total)} tickets touch configuration in some way</div></div>
-    <div class="kpi"><div class="label">Top-10 recurring categories</div><div class="value clickable" onclick="${h(()=>openDrawer('Top-10 recurring categories','the 10 biggest recurring ticket types', TICKETS.filter(t=>top10CatSet.has(t.cat))))}">${D.top10_candidates_pct}%</div><div class="sub">of all tickets are one of just 10 recurring types</div></div>
-    <div class="kpi"><div class="label">Peak month</div><div class="value clickable" onclick="${h(()=>openDrawer(fmtMonth('2026-07')+' tickets','peak month', TICKETS.filter(t=>t.m==='2026-07')))}">${fmtMonth('2026-07')}</div><div class="sub">${fmtNum(D.overall_by_month['2026-07'])} tickets, highest of the period</div></div>
-    <div class="kpi"><div class="label">Est. addressable workload</div><div class="value clickable" onclick="${h(()=>openDrawer('Structurally addressable tickets','Configuration + Configuration-Tech Dependent + Feature Enabling + DB Level + Knowledge-Gap + Data Request', TICKETS.filter(t=>scenarioCatSet.has(t.cat))))}">~${D.scenario.total_reduction_pct}%</div><div class="sub">scenario estimate — see Automation Opportunities tab</div></div>
+    <div class="kpi"><div class="label">Total tickets (shown)</div><div class="value clickable" onclick="${h(()=>openDrawer('Tickets matching filter', filterLabel(), FT))}">${fmtNum(FT.length)}</div><div class="sub">${filterLabel()}</div></div>
+    <div class="kpi"><div class="label">Bugs vs Tasks</div><div class="value"><span class="clickable" onclick="${h(()=>openDrawer('Bugs','', FT.filter(t=>t.t==='Bug')))}">${fmtNum(bt.b)}</span> / <span class="clickable" onclick="${h(()=>openDrawer('Tasks','', FT.filter(t=>t.t==='Task')))}">${fmtNum(bt.t)}</span></div><div class="sub">${Math.round(bt.b/total*100)}% bugs · ${Math.round(bt.t/total*100)}% tasks</div></div>
+    <div class="kpi"><div class="label">Configuration-related</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration-related tickets','any configuration touchpoint', FT.filter(t=>!!t.cfg)))}">${(FT.filter(t=>!!t.cfg).length/total*100).toFixed(0)}%</div><div class="sub">${fmtNum(FT.filter(t=>!!t.cfg).length)} tickets touch configuration in some way</div></div>
+    <div class="kpi"><div class="label">Top-10 recurring categories</div><div class="value clickable" onclick="${h(()=>openDrawer('Top-10 recurring categories','the 10 biggest recurring ticket types', FT.filter(t=>top10CatSet.has(t.cat))))}">${(top10Total/total*100).toFixed(0)}%</div><div class="sub">of shown tickets are one of just 10 recurring types</div></div>
+    <div class="kpi"><div class="label">Uncategorized</div><div class="value clickable" onclick="${h(()=>openDrawer('Uncategorized tickets','closed without Root Cause / Type filled in', FT.filter(t=>UNCLASSIFIED_CATS.has(t.cat))))}">${fmtNum(uncatBugs+uncatTasks)}</div><div class="sub">${fmtNum(uncatBugs)} bugs · ${fmtNum(uncatTasks)} tasks — worth pushing PST on</div></div>
+    <div class="kpi"><div class="label">Est. addressable workload</div><div class="value clickable" onclick="${h(()=>openDrawer('Structurally addressable tickets','Configuration + Configuration-Tech Dependent + Feature Enabling + DB Level + Knowledge-Gap + Data Request', FT.filter(t=>SCENARIO_CAT_SET.has(t.cat))))}">~${scenario.totalReductionPct}%</div><div class="sub">scenario estimate — see Automation Opportunities tab</div></div>
   </div>`));
 
-  p.appendChild(el(`<h2 class="sec-title">Total PST tickets by month</h2>
-    <p class="sec-note">Steady climb from January, peaking at ${fmtNum(D.overall_by_month['2026-07'])} in July.</p>`));
+  p.appendChild(el(`<h2 class="sec-title">Tickets by month</h2>
+    <p class="sec-note">Showing: ${filterLabel()}.</p>`));
   const c1 = el('<div class="card"><div id="chart-overview-volume"></div></div>');
   p.appendChild(c1);
-  lineChart(c1.querySelector('#chart-overview-volume'), D.months, {'All PST tickets': D.months.map(m=>D.overall_by_month[m])}, {legend:false, colors:['var(--series-1)'],
-    onPointClick: (k,i,m)=> openDrawer(fmtMonth(m)+' tickets','all PST tickets that month', TICKETS.filter(t=>t.m===m))});
-  tableView(c1, ['Month','Tickets'], D.months.map(m=>[fmtMonth(m), fmtNum(D.overall_by_month[m])]));
+  const monthCounts = groupCount(FT, t=>t.m);
+  lineChart(c1.querySelector('#chart-overview-volume'), monthsList, {'Tickets': monthsList.map(m=>monthCounts[m]||0)}, {legend:false, colors:['var(--series-1)'],
+    onPointClick: (k,i,m)=> openDrawer(fmtMonth(m)+' tickets','', FT.filter(t=>t.m===m))});
+  tableView(c1, ['Month','Tickets'], monthsList.map(m=>[fmtMonth(m), fmtNum(monthCounts[m]||0)]));
 
   p.appendChild(el(`<h2 class="sec-title">Bug vs Task split, by month</h2>
     <p class="sec-note">Tasks ("do this for me") slightly outnumber Bugs ("fix this") most months.</p>`));
   const c2 = el('<div class="card"><div id="chart-overview-bt"></div></div>');
   p.appendChild(c2);
-  stackedBar(c2.querySelector('#chart-overview-bt'), D.months, {
-    'Task': D.months.map(m=> (D.bug_vs_task_by_month[m]||{})['Task']||0),
-    'Bug': D.months.map(m=> (D.bug_vs_task_by_month[m]||{})['Bug']||0),
-    'Other': D.months.map(m=> (D.bug_vs_task_by_month[m]||{})['Other']||0),
+  const monthBt = {}; monthsList.forEach(m=>{ const rows=FT.filter(t=>t.m===m); const s=btSplit(rows); monthBt[m]={b:s.b,t:s.t,o:rows.length-s.b-s.t}; });
+  stackedBar(c2.querySelector('#chart-overview-bt'), monthsList, {
+    'Task': monthsList.map(m=> monthBt[m].t),
+    'Bug': monthsList.map(m=> monthBt[m].b),
+    'Other': monthsList.map(m=> monthBt[m].o),
   }, {colors:['var(--series-1)','var(--series-2)','var(--series-other)'],
-    onSegClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'', TICKETS.filter(t=>t.m===m && t.t===k))});
-  tableView(c2, ['Month','Task','Bug','Other'], D.months.map(m=>{const r=D.bug_vs_task_by_month[m]||{}; return [fmtMonth(m), r['Task']||0, r['Bug']||0, r['Other']||0];}));
+    onSegClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'', FT.filter(t=>t.m===m && (k==='Other' ? (t.t!=='Bug'&&t.t!=='Task') : t.t===k)))});
+  tableView(c2, ['Month','Task','Bug','Other'], monthsList.map(m=>[fmtMonth(m), monthBt[m].t, monthBt[m].b, monthBt[m].o]));
 
   p.appendChild(el(`<div class="callout"><b>What drove the July spike:</b> a jump in Configuration and Configuration-Tech Dependent tasks — not a one-time event. Cleanup tickets actually fell that month, so this looks like ongoing growth, not a blip.</div>`));
-})();
+}
+registerRenderer(renderOverview);
 
 // ---------------- COMPONENT EXPLORER (sunburst) ----------------
 (function(){
@@ -657,7 +776,7 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   }
 
   p.appendChild(el(`<h2 class="sec-title">Component → Brand → Product → Environment</h2>
-  <p class="sec-note">Every ticket, drilled from the technical Component it touches down to Brand, Product, and Environment.</p>`));
+  <p class="sec-note">Every ticket, drilled from the technical Component it touches down to Brand, Product, and Environment. Always shows the complete dataset, independent of the type/month filter above.</p>`));
 
   const layout = el('<div class="explorer-layout"></div>');
   const leftCol = el('<div class="card"></div>');
@@ -902,61 +1021,87 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   });
 })();
 
-// ---------------- CATEGORIES ----------------
-(function(){
-  const p = document.getElementById('panel-categories');
+// ---------------- CATEGORIES (Ticket Type) ----------------
+function renderCategories(){
+  const p = document.getElementById('panel-categories'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const catCounts = groupCount(FT, t=>t.cat);
+  const catSorted = sortedEntries(catCounts);
+  const unclBugs = catCounts['Bug - Uncategorized']||0, unclTasks = catCounts['Task - Uncategorized']||0;
+  const unclTotal = unclBugs+unclTasks;
+  const topActionable = catSorted.filter(([c])=>!UNCLASSIFIED_CATS.has(c)).slice(0,6);
+  const topActionablePct = Math.round(topActionable.reduce((s,[,v])=>s+v,0)/total*100);
+
   p.appendChild(el(`<h2 class="sec-title">Top recurring ticket categories</h2>
-  <p class="sec-note">The top 6 actionable categories are ${Math.round((D.category_top20['Configuration']+D.category_top20['Configuration-Tech Dependent']+D.category_top20['DB Level']+D.category_top20['Knowledge-Gap']+D.category_top20['Data Request']+D.category_top20['Feature Enabling'])/D.total_tickets*100)}% of all tickets.</p>`));
+  <p class="sec-note">Showing: ${filterLabel()}. The top 6 actionable categories are ${topActionablePct}% of shown tickets.</p>`));
   const c1 = el('<div class="card"><div id="chart-cat-top"></div></div>');
   p.appendChild(c1);
-  const catData = Object.entries(D.category_top20).slice(0,14).map(([label,value])=>{
-    const matched = TICKETS.filter(t=>t.cat===label); const bt = btSplit(matched);
-    return {label, value, bt, sub: (value/D.total_tickets*100).toFixed(1)+'% of all tickets · '+btNote(matched),
+  const catData = catSorted.slice(0,14).map(([label,value])=>{
+    const matched = FT.filter(t=>t.cat===label); const bt = btSplit(matched);
+    return {label, value, bt, sub: (value/total*100).toFixed(1)+'% of shown tickets · '+btNote(matched),
       onClick: ()=> openDrawer(label, 'category', matched)};
   });
-  hbar(c1.querySelector('#chart-cat-top'), catData);
-  tableView(c1, ['Category','Tickets','Bugs','Tasks','% of all'], catData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/D.total_tickets*100).toFixed(1)+'%']));
+  if (catData.length) {
+    hbar(c1.querySelector('#chart-cat-top'), catData);
+    tableView(c1, ['Category','Tickets','Bugs','Tasks','% of shown'], catData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/total*100).toFixed(1)+'%']));
+  } else { c1.querySelector('#chart-cat-top').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No tickets match the current filter.</p>'; }
 
-  p.appendChild(el(`<div class="callout warn"><b>Classification gap (${fmtNum(D.unclassified_total)} tickets, ${D.unclassified_pct}%):</b> closed without Root Cause / Type filled in — a data-hygiene fix, not a product gap. Excluded from the ranking below.</div>`));
+  p.appendChild(el(`<div class="callout warn"><b>Classification gap (${fmtNum(unclTotal)} tickets, ${(unclTotal/total*100).toFixed(1)}%):</b> ${fmtNum(unclBugs)} bugs · ${fmtNum(unclTasks)} tasks closed without Root Cause / Type filled in — worth pushing PST on why. Excluded from the ranking below.<span class="clickable" style="margin-left:8px" onclick="${h(()=>openDrawer('Uncategorized tickets','', FT.filter(t=>UNCLASSIFIED_CATS.has(t.cat))))}">View these tickets →</span></div>`));
 
   p.appendChild(el(`<h2 class="sec-title">Trend for the top recurring categories</h2>
-  <p class="sec-note">All six show up every month — steady-state workload, not a one-time spike.</p>`));
+  <p class="sec-note">Steady-state workload — shown across ${filterLabel()}.</p>`));
   const c2 = el('<div class="card"><div id="chart-cat-trend"></div></div>');
   p.appendChild(c2);
-  const topCats = ['Configuration','Configuration-Tech Dependent','DB Level','Knowledge-Gap','Data Request','Feature Enabling'];
-  const catSeries = {}; topCats.forEach(c=> catSeries[c] = D.months.map(m => (D.category_trend[m]||{})[c]||0));
-  lineChart(c2.querySelector('#chart-cat-trend'), D.months, catSeries, {legend:true, endLabels:false,
-    onPointClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'', TICKETS.filter(t=>t.cat===k && t.m===m))});
-  tableView(c2, ['Month', ...topCats], D.months.map(m=>[fmtMonth(m), ...topCats.map(c=>(D.category_trend[m]||{})[c]||0)]));
-})();
+  const monthsList = monthsInRange();
+  const topCats = topActionable.map(([c])=>c);
+  const catSeries = {}; topCats.forEach(c=> catSeries[c] = monthsList.map(m => FT.filter(t=>t.cat===c && t.m===m).length));
+  if (topCats.length) {
+    lineChart(c2.querySelector('#chart-cat-trend'), monthsList, catSeries, {legend:true, endLabels:false,
+      onPointClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'', FT.filter(t=>t.cat===k && t.m===m))});
+    tableView(c2, ['Month', ...topCats], monthsList.map(m=>[fmtMonth(m), ...topCats.map(c=>FT.filter(t=>t.cat===c&&t.m===m).length)]));
+  } else { c2.querySelector('#chart-cat-trend').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No tickets match the current filter.</p>'; }
+}
+registerRenderer(renderCategories);
 
 // ---------------- BRANDS ----------------
-(function(){
-  const p = document.getElementById('panel-brands');
+function renderBrands(){
+  const p = document.getElementById('panel-brands'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const brandCounts = groupCount(FT, t=>t.br);
+  const brandSorted = sortedEntries(brandCounts);
+  const top10Sum = brandSorted.slice(0,10).reduce((s,[,v])=>s+v,0);
+  const top20Sum = brandSorted.slice(0,20).reduce((s,[,v])=>s+v,0);
+  const typeLabel = FILTER.type==='all' ? 'all tickets' : (FILTER.type==='Bug'?'bug count':'task count');
+
   p.appendChild(el(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr)">
-    <div class="kpi"><div class="label">Distinct brands/orgs</div><div class="value">${D.brand_pareto.distinct_brands}</div><div class="sub">raised at least one PST ticket</div></div>
-    <div class="kpi"><div class="label">Top 10 brands</div><div class="value">${D.brand_pareto.top10_pct}%</div><div class="sub">of total ticket volume</div></div>
-    <div class="kpi"><div class="label">Top 20 brands</div><div class="value">${D.brand_pareto.top20_pct}%</div><div class="sub">of total ticket volume</div></div>
+    <div class="kpi"><div class="label">Distinct brands/orgs</div><div class="value">${brandSorted.length}</div><div class="sub">raised at least one matching ticket</div></div>
+    <div class="kpi"><div class="label">Top 10 brands</div><div class="value">${(top10Sum/total*100).toFixed(1)}%</div><div class="sub">of shown ticket volume</div></div>
+    <div class="kpi"><div class="label">Top 20 brands</div><div class="value">${(top20Sum/total*100).toFixed(1)}%</div><div class="sub">of shown ticket volume</div></div>
   </div>`));
-  p.appendChild(el(`<h2 class="sec-title">Ticket volume by brand</h2>
-  <p class="sec-note">"Others" is Jira's catch-all for untagged tickets, not one client. Optum has its own tab.</p>`));
+  p.appendChild(el(`<h2 class="sec-title">Ticket volume by brand — ranked by ${typeLabel}</h2>
+  <p class="sec-note">Showing: ${filterLabel()}. Use the Type/Months controls above to switch between bug-only and task-only rankings, or narrow the month range. "Others" is Jira's catch-all for untagged tickets, not one client. Optum has its own tab.</p>`));
   const c1 = el('<div class="card"><div id="chart-brand-top"></div></div>');
   p.appendChild(c1);
-  const brandData = Object.entries(D.brand_top25).slice(0,18).map(([label,value])=>{
-    const matched = TICKETS.filter(t=>t.br===label); const bt = btSplit(matched);
-    return {label,value, bt, sub:(value/D.total_tickets*100).toFixed(1)+'% of all tickets · '+btNote(matched),
+  const brandData = brandSorted.slice(0,18).map(([label,value])=>{
+    const matched = FT.filter(t=>t.br===label); const bt = btSplit(matched);
+    return {label,value, bt, sub:(value/total*100).toFixed(1)+'% of shown tickets · '+btNote(matched),
       onClick: ()=> openDrawer(label, 'brand', matched)};
   });
-  hbar(c1.querySelector('#chart-brand-top'), brandData, {color:'var(--series-1)'});
-  tableView(c1, ['Brand','Tickets','Bugs','Tasks','% of all'], brandData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/D.total_tickets*100).toFixed(1)+'%']));
+  if (brandData.length) {
+    hbar(c1.querySelector('#chart-brand-top'), brandData, {color:'var(--series-1)'});
+    tableView(c1, ['Brand','Tickets','Bugs','Tasks','% of shown'], brandData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/total*100).toFixed(1)+'%']));
+  } else { c1.querySelector('#chart-brand-top').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No tickets match the current filter.</p>'; }
 
   p.appendChild(el(`<h2 class="sec-title">Which brands hit which category</h2>
-  <p class="sec-note">Top 12 brands by volume against the top 8 recurring categories. Darker cell = more tickets — click a cell, row, or column for the list.</p>`));
+  <p class="sec-note">Top 12 brands by shown volume against the top 8 recurring categories. Darker cell = more tickets — click a cell, row, or column for the list.</p>`));
   const c2 = el('<div class="card heatmap-wrap"></div>');
-  const heatBrands = Object.keys(D.brand_top25).filter(b=>b!=='Others' && b!=='All Brands').slice(0,12);
-  const heatCats = Object.keys(D.category_top20).filter(c=>!UNCLASSIFIED_CATS.has(c)).slice(0,8);
+  const heatBrands = brandSorted.filter(([b])=>b!=='Others' && b!=='All Brands').slice(0,12).map(([b])=>b);
+  const catCountsForHeat = groupCount(FT, t=>t.cat);
+  const heatCats = sortedEntries(catCountsForHeat).filter(([c])=>!UNCLASSIFIED_CATS.has(c)).slice(0,8).map(([c])=>c);
   const heatCounts = {};
-  TICKETS.forEach(tk=>{
+  FT.forEach(tk=>{
     if(heatBrands.includes(tk.br) && heatCats.includes(tk.cat)){
       (heatCounts[tk.br] || (heatCounts[tk.br]={}))[tk.cat] = (heatCounts[tk.br][tk.cat]||0)+1;
     }
@@ -972,87 +1117,123 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
       const frac = v/heatMax;
       const bg = v===0 ? 'transparent' : `color-mix(in srgb, var(--series-1) ${Math.round(15+frac*75)}%, white)`;
       const fg = frac>0.55 ? '#fff' : 'var(--text-primary)';
-      const click = v ? ` onclick="${h(()=>openDrawer(`${b} · ${c}`,'', TICKETS.filter(x=>x.br===b && x.cat===c)))}"` : '';
+      const click = v ? ` onclick="${h(()=>openDrawer(`${b} · ${c}`,'', FT.filter(x=>x.br===b && x.cat===c)))}"` : '';
       return `<td class="heat-cell${v?' clickable':''}" style="background:${bg};color:${fg}"${click}>${v||''}</td>`;
     }).join('');
-    return `<tr><td class="heat-rowlabel clickable" onclick="${h(()=>openDrawer(b,'brand', TICKETS.filter(x=>x.br===b)))}">${escapeHtml(b)}</td>${cells}<td class="num">${fmtNum(D.brand_top25[b]||0)}</td></tr>`;
+    return `<tr><td class="heat-rowlabel clickable" onclick="${h(()=>openDrawer(b,'brand', FT.filter(x=>x.br===b)))}">${escapeHtml(b)}</td>${cells}<td class="num">${fmtNum(brandCounts[b]||0)}</td></tr>`;
   }).join('');
   heatTable.innerHTML = headHtml + bodyHtml;
   c2.appendChild(heatTable);
   p.appendChild(c2);
   p.appendChild(el(`<div class="callout"><b>Reading it:</b> a brand with one dark column has a single recurring problem worth a per-brand fix; a brand with several mid-tone cells has a broad configuration gap, not an isolated bug.</div>`));
-})();
+}
+registerRenderer(renderBrands);
 
 // ---------------- ROOT CAUSE & RESOLUTION ----------------
-(function(){
-  const p = document.getElementById('panel-rootcause');
+function renderRootCause(){
+  const p = document.getElementById('panel-rootcause'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const bugsFT = FT.filter(t=>t.t==='Bug');
+  const bugTotal = bugsFT.length || 1;
+  const rcCounts = groupCount(bugsFT, t=>t.rc);
+  const rcSorted = sortedEntries(rcCounts);
+
   p.appendChild(el(`<h2 class="sec-title">Bug root causes</h2>
-  <p class="sec-note">"Configuration Issue" alone is ${(D.bug_root_cause['Configuration Issue']/D.bug_vs_task_total['Bug']*100).toFixed(0)}% of all bugs.</p>`));
+  <p class="sec-note">Showing: ${filterLabel()}. "Configuration Issue" alone is ${bugsFT.length ? ((rcCounts['Configuration Issue']||0)/bugTotal*100).toFixed(0) : 0}% of shown bugs.</p>`));
   const c1 = el('<div class="card"><div id="chart-rootcause"></div></div>');
   p.appendChild(c1);
-  const rcData = Object.entries(D.bug_root_cause).map(([label,value])=>({label,value, sub:(value/D.bug_vs_task_total['Bug']*100).toFixed(1)+'% of bugs',
-    onClick: ()=> openDrawer(label, 'root cause', TICKETS.filter(t=>t.rc===label))}));
-  hbar(c1.querySelector('#chart-rootcause'), rcData, {color:'var(--series-2)'});
-  tableView(c1, ['Root cause','Bugs','% of bugs'], rcData.map(d=>[d.label, fmtNum(d.value), (d.value/D.bug_vs_task_total['Bug']*100).toFixed(1)+'%']));
+  const rcData = rcSorted.map(([label,value])=>({label,value, sub:(value/bugTotal*100).toFixed(1)+'% of shown bugs',
+    onClick: ()=> openDrawer(label, 'root cause', bugsFT.filter(t=>t.rc===label))}));
+  if (rcData.length) {
+    hbar(c1.querySelector('#chart-rootcause'), rcData, {color:'var(--series-2)'});
+    tableView(c1, ['Root cause','Bugs','% of shown bugs'], rcData.map(d=>[d.label, fmtNum(d.value), (d.value/bugTotal*100).toFixed(1)+'%']));
+  } else { c1.querySelector('#chart-rootcause').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No bugs match the current filter.</p>'; }
 
   p.appendChild(el(`<h2 class="sec-title">Environment / stage</h2>
   <p class="sec-note">Sourced directly from Jira's own Environment field, using its values as-is.</p>`));
   const c3 = el('<div class="card"><div id="chart-env"></div></div>');
   p.appendChild(c3);
-  const envOrder = Object.keys(D.environment).sort((a,b)=>D.environment[b]-D.environment[a]);
-  const envData = envOrder.map(k=>{
-    const matched = TICKETS.filter(t=>t.env===k);
-    return {label:k, value:D.environment[k], bt:btSplit(matched), sub:(D.environment[k]/D.total_tickets*100).toFixed(1)+'% of all tickets · '+btNote(matched),
-      onClick: ()=> openDrawer(k, 'environment', matched)};
+  const envCounts = groupCount(FT, t=>t.env);
+  const envSorted = sortedEntries(envCounts);
+  const envData = envSorted.map(([label,value])=>{
+    const matched = FT.filter(t=>t.env===label);
+    return {label, value, bt:btSplit(matched), sub:(value/total*100).toFixed(1)+'% of shown tickets · '+btNote(matched),
+      onClick: ()=> openDrawer(label, 'environment', matched)};
   });
-  hbar(c3.querySelector('#chart-env'), envData, {color:'var(--series-4)'});
-  tableView(c3, ['Stage','Tickets','Bugs','Tasks','% of all'], envData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/D.total_tickets*100).toFixed(1)+'%']));
-})();
+  if (envData.length) {
+    hbar(c3.querySelector('#chart-env'), envData, {color:'var(--series-4)'});
+    tableView(c3, ['Stage','Tickets','Bugs','Tasks','% of shown'], envData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/total*100).toFixed(1)+'%']));
+  } else { c3.querySelector('#chart-env').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No tickets match the current filter.</p>'; }
+
+  const prodBugs = bugsFT.filter(t=>t.env==='Prod' || t.env==='Production').length;
+  const nonProdBugs = bugsFT.length - prodBugs;
+  p.appendChild(el(`<div class="callout warn"><b>Why environment matters for bugs:</b> ${fmtNum(prodBugs)} of ${fmtNum(bugsFT.length)} shown bugs (${bugsFT.length ? (prodBugs/bugsFT.length*100).toFixed(0) : 0}%) are in Production — that's the SLA-relevant slice PST tracks by priority (P0/P1/P2). The other ${fmtNum(nonProdBugs)} are UAT/Demo/Go-Live/Staging/Nightly, where the same SLA urgency doesn't apply. <span class="clickable" onclick="${h(()=>openDrawer('Production bugs','SLA-relevant', bugsFT.filter(t=>t.env==='Prod'||t.env==='Production')))}">View production bugs →</span></div>`));
+}
+registerRenderer(renderRootCause);
 
 // ---------------- CONFIGURATION ----------------
-(function(){
-  const p = document.getElementById('panel-config');
-  const biggestBucket = Object.entries(D.config_buckets)[0];
+// Keyword heuristic used below to split enablement-flavored tickets into RBAC/self-service
+// candidates vs. tickets that genuinely need a human to validate data (hot-swap, DB-level change).
+// This runs against the ticket summary text — a starting point to sanity-check with PST, not a
+// final classification.
+const DB_VALIDATION_KW = /\bhot.?swap\b|\bDB\b|\bdatabase\b|\bdata\s*fix\b|\bmanual\s*(validation|check)\b|\bbackend\b|\bmigrat|\bMID\b/i;
+
+function renderConfig(){
+  const p = document.getElementById('panel-config'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const monthsList = monthsInRange();
+  const cfgFT = FT.filter(t=>!!t.cfg);
+  const cfgTotal = cfgFT.length || 1;
+  const cfgCounts = groupCount(cfgFT, t=>t.cfg);
+  const cfgSorted = sortedEntries(cfgCounts);
+  const biggestBucket = cfgSorted[0];
+
   p.appendChild(el(`<div class="kpi-row" style="grid-template-columns:repeat(3,1fr)">
-    <div class="kpi"><div class="label">Configuration-related tickets</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration-related tickets','any configuration touchpoint', TICKETS.filter(t=>!!t.cfg)))}">${fmtNum(D.config_total)}</div><div class="sub">${D.config_pct.toFixed(1)}% of all PST tickets</div></div>
-    <div class="kpi"><div class="label">Biggest sub-bucket</div><div class="value clickable" onclick="${h(()=>openDrawer(biggestBucket?biggestBucket[0]:'', 'configuration sub-bucket', TICKETS.filter(t=>biggestBucket && t.cfg===biggestBucket[0])))}">${biggestBucket?fmtNum(biggestBucket[1]):''}</div><div class="sub">${biggestBucket?biggestBucket[0]:''}</div></div>
-    <div class="kpi"><div class="label">Enablement-flavored</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration enablement','feature flag / config turn-on', TICKETS.filter(t=>t.cfg==='Configuration enablement (feature flag / config turn-on)')))}">${fmtNum(D.config_buckets['Configuration enablement (feature flag / config turn-on)']||0)}</div><div class="sub">flag/config "please turn this on" tickets</div></div>
+    <div class="kpi"><div class="label">Configuration-related tickets</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration-related tickets','any configuration touchpoint', cfgFT))}">${fmtNum(cfgFT.length)}</div><div class="sub">${(cfgFT.length/total*100).toFixed(1)}% of shown tickets</div></div>
+    <div class="kpi"><div class="label">Biggest sub-bucket</div><div class="value clickable" onclick="${h(()=>openDrawer(biggestBucket?biggestBucket[0]:'', 'configuration sub-bucket', cfgFT.filter(t=>biggestBucket && t.cfg===biggestBucket[0])))}">${biggestBucket?fmtNum(biggestBucket[1]):'—'}</div><div class="sub">${biggestBucket?biggestBucket[0]:''}</div></div>
+    <div class="kpi"><div class="label">Enablement-flavored</div><div class="value clickable" onclick="${h(()=>openDrawer('Configuration enablement','feature flag / config turn-on', cfgFT.filter(t=>t.cfg==='Configuration enablement (feature flag / config turn-on)')))}">${fmtNum(cfgCounts['Configuration enablement (feature flag / config turn-on)']||0)}</div><div class="sub">flag/config "please turn this on" tickets</div></div>
   </div>`));
-  p.appendChild(el(`<h2 class="sec-title">Breaking the ${D.config_pct.toFixed(0)}% "configuration" number down</h2>
-  <p class="sec-note">Self-serve gaps (enablement, tech-dependency) vs. operator mistakes (incorrect config) vs. real product limits.</p>`));
+  p.appendChild(el(`<h2 class="sec-title">Breaking the ${(cfgFT.length/total*100).toFixed(0)}% "configuration" number down</h2>
+  <p class="sec-note">Showing: ${filterLabel()}. Self-serve gaps (enablement, tech-dependency) vs. operator mistakes (incorrect config) vs. real product limits.</p>`));
   const c1 = el('<div class="card"><div id="chart-config-bucket"></div></div>');
   p.appendChild(c1);
-  const cfgData = Object.entries(D.config_buckets).map(([label,value])=>{
-    const matched = TICKETS.filter(t=>t.cfg===label); const bt = btSplit(matched);
-    return {label, value, bt, sub:(value/D.config_total*100).toFixed(1)+'% of configuration tickets · '+btNote(matched),
+  const cfgData = cfgSorted.map(([label,value])=>{
+    const matched = cfgFT.filter(t=>t.cfg===label); const bt = btSplit(matched);
+    return {label, value, bt, sub:(value/cfgTotal*100).toFixed(1)+'% of shown configuration tickets · '+btNote(matched),
       onClick: ()=> openDrawer(label, 'configuration sub-bucket', matched)};
   });
-  hbar(c1.querySelector('#chart-config-bucket'), cfgData, {color:'var(--series-1)', leftPad:290});
-  tableView(c1, ['Bucket','Tickets','Bugs','Tasks','% of config tickets'], cfgData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/D.config_total*100).toFixed(1)+'%']));
+  if (cfgData.length) {
+    hbar(c1.querySelector('#chart-config-bucket'), cfgData, {color:'var(--series-1)', leftPad:290});
+    tableView(c1, ['Bucket','Tickets','Bugs','Tasks','% of shown config'], cfgData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/cfgTotal*100).toFixed(1)+'%']));
+  } else { c1.querySelector('#chart-config-bucket').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No configuration tickets match the current filter.</p>'; }
 
   p.appendChild(el(`<h2 class="sec-title">Configuration sub-bucket trend</h2>
   <p class="sec-note">"Technical dependency" and "Configuration enablement" are both trending flat-to-up, not shrinking on their own.</p>`));
   const c2 = el('<div class="card"><div id="chart-config-trend"></div></div>');
   p.appendChild(c2);
   const cfgTop = ['Technical dependency (needs engineering to change config)','Incorrect configuration (config/human error bug)','Configuration enablement (feature flag / config turn-on)','Configuration knowledge gap'];
-  const cfgSeries = {}; const cfgLabelFor = {}; cfgTop.forEach(c=>{ const lbl = c.length>34?c.slice(0,15)+'…':c; cfgLabelFor[lbl]=c; cfgSeries[lbl] = D.months.map(m=>(D.config_bucket_trend[m]||{})[c]||0); });
-  lineChart(c2.querySelector('#chart-config-trend'), D.months, cfgSeries, {legend:true, endLabels:false,
-    onPointClick: (k,i,m)=> openDrawer(`${cfgLabelFor[k]||k} · ${fmtMonth(m)}`,'', TICKETS.filter(t=>t.cfg===(cfgLabelFor[k]||k) && t.m===m))});
-  tableView(c2, ['Month', ...cfgTop], D.months.map(m=>[fmtMonth(m), ...cfgTop.map(c=>(D.config_bucket_trend[m]||{})[c]||0)]));
+  const cfgSeries = {}; const cfgLabelFor = {}; cfgTop.forEach(c=>{ const lbl = c.length>34?c.slice(0,15)+'…':c; cfgLabelFor[lbl]=c; cfgSeries[lbl] = monthsList.map(m=> cfgFT.filter(t=>t.cfg===c && t.m===m).length); });
+  lineChart(c2.querySelector('#chart-config-trend'), monthsList, cfgSeries, {legend:true, endLabels:false,
+    onPointClick: (k,i,m)=> openDrawer(`${cfgLabelFor[k]||k} · ${fmtMonth(m)}`,'', cfgFT.filter(t=>t.cfg===(cfgLabelFor[k]||k) && t.m===m))});
+  tableView(c2, ['Month', ...cfgTop], monthsList.map(m=>[fmtMonth(m), ...cfgTop.map(c=>cfgFT.filter(t=>t.cfg===c&&t.m===m).length)]));
 
-  p.appendChild(el(`<div class="callout warn"><b>"Incorrect configuration"</b> (${fmtNum(D.config_buckets['Incorrect configuration (config/human error bug)']||0)} tickets) is a wrong setting, not a change request — the strongest case for config-time validation in the admin UI.</div>`));
+  p.appendChild(el(`<div class="callout warn"><b>"Incorrect configuration"</b> (${fmtNum(cfgCounts['Incorrect configuration (config/human error bug)']||0)} tickets) is a wrong setting, not a change request — the strongest case for config-time validation in the admin UI.</div>`));
 
   // ---- Deep dive: Configuration + Configuration-Tech Dependent text-mined sub-themes ----
+  // (theme classification is precomputed server-side from full ticket text; here we intersect
+  // each theme's ticket set with the current type/month filter so the breakdown stays reactive.)
   p.appendChild(el(`<h2 class="sec-title">What's inside Configuration + Configuration-Tech Dependent</h2>
-  <p class="sec-note">Text-mining the ${fmtNum(CFGDIVE.total_target)} tickets in these two categories (30% of all PST volume) into specific, repeatable request types.</p>`));
+  <p class="sec-note">Text-mining the ${fmtNum(CFGDIVE.total_target)} tickets in these two categories into specific, repeatable request types (shown: matching current filter).</p>`));
   const c1b = el('<div class="card"><div id="chart-cfg-theme"></div></div>');
   p.appendChild(c1b);
-  const themeEntries = Object.entries(CFGDIVE.theme_counts).sort((a,b)=>b[1]-a[1]);
-  const themeData = themeEntries.map(([label,value])=>{
-    const matched = keysToTickets(CFGDIVE.theme_ticket_keys[label]||[]); const bt = btSplit(matched);
-    return {label, value, bt, sub:(value/CFGDIVE.total_target*100).toFixed(1)+'% of Configuration + Config-Tech-Dependent · '+btNote(matched),
+  const themeData = Object.keys(CFGDIVE.theme_ticket_keys).map(label=>{
+    const matched = keysToTickets(CFGDIVE.theme_ticket_keys[label]||[]).filter(t=> typeOk(t) && monthOk(t));
+    const bt = btSplit(matched);
+    return {label, value: matched.length, bt, sub: matched.length ? (matched.length/CFGDIVE.total_target*100).toFixed(1)+'% of the original target set · '+btNote(matched) : '',
       onClick: ()=> openDrawer(label, 'configuration theme (text-mined)', matched)};
-  });
+  }).filter(d=>d.value>0).sort((a,b)=>b.value-a.value);
   // donut view: top 7 themes get their own slice; the rest fold into one "combined" slice so the
   // chart stays readable (past ~8 categorical slices a pie gets hard to read at a glance) — full
   // detail for every theme, folded or not, is still in the table below and each slice drills down.
@@ -1061,68 +1242,123 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   const donutRest = themeData.slice(7);
   const donutData = donutTop.slice();
   if (donutRest.length) {
-    const restTickets = donutRest.flatMap(d=> keysToTickets(CFGDIVE.theme_ticket_keys[d.label]||[]));
+    const restTickets = donutRest.flatMap(d=> keysToTickets(CFGDIVE.theme_ticket_keys[d.label]||[]).filter(t=> typeOk(t) && monthOk(t)));
     const restTotal = donutRest.reduce((s,d)=>s+d.value,0);
     donutData.push({label:`All other themes combined (${donutRest.length})`, value: restTotal, color: DONUT_COLORS[7],
       sub: donutRest.map(d=>d.label).join(', '),
       onClick: ()=> openDrawer('All other configuration themes combined', 'configuration theme (text-mined)', restTickets)});
   }
-  donutChart(c1b.querySelector('#chart-cfg-theme'), donutData, {centerLabel:'tickets'});
-  tableView(c1b, ['Theme','Tickets','Bugs','Tasks','% of target set'], themeData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/CFGDIVE.total_target*100).toFixed(1)+'%']));
+  if (themeData.length) {
+    donutChart(c1b.querySelector('#chart-cfg-theme'), donutData, {centerLabel:'tickets'});
+    tableView(c1b, ['Theme','Tickets','Bugs','Tasks','% of target set'], themeData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t), (d.value/CFGDIVE.total_target*100).toFixed(1)+'%']));
+  } else { c1b.querySelector('#chart-cfg-theme').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No matching tickets in the current filter.</p>'; }
 
-  p.appendChild(el(`<div class="callout good"><b>Where this points:</b> "Access & permissions" and "Feature/module enablement" together are ${(((CFGDIVE.theme_counts['Access & permissions requests']||0)+(CFGDIVE.theme_counts['Feature / module enablement (Neo, Connect+, Marvel, Engage, etc.)']||0))/CFGDIVE.total_target*100).toFixed(0)}% of this workload — simple permission/module toggles, gate-able through an admin UI instead of a ticket.</div>`));
-})();
+  const accessCount = themeData.find(d=>d.label==='Access & permissions requests')?.value||0;
+  const featureCount = themeData.find(d=>d.label==='Feature / module enablement (Neo, Connect+, Marvel, Engage, etc.)')?.value||0;
+  const themeShownTotal = themeData.reduce((s,d)=>s+d.value,0) || 1;
+  p.appendChild(el(`<div class="callout good"><b>Where this points:</b> "Access & permissions" and "Feature/module enablement" together are ${((accessCount+featureCount)/themeShownTotal*100).toFixed(0)}% of this workload — simple permission/module toggles, gate-able through an admin UI instead of a ticket.</div>`));
+
+  // ---- Self-service (RBAC) candidates vs. tickets that need manual DB validation ----
+  const enablementUniverse = FT.filter(t=> t.cfg==='Configuration enablement (feature flag / config turn-on)' || t.tot==='Feature Enabling');
+  const rbacCandidates = enablementUniverse.filter(t=> !DB_VALIDATION_KW.test(t.s||''));
+  const dbValidationNeeded = enablementUniverse.filter(t=> DB_VALIDATION_KW.test(t.s||''));
+  const dbLevelFT = FT.filter(t=>t.cat==='DB Level');
+  p.appendChild(el(`<h2 class="sec-title">Enablement tasks: self-service candidates vs. needs manual DB validation</h2>
+  <p class="sec-note">Within the ${fmtNum(enablementUniverse.length)} enablement-flavored tickets shown: which look like a simple flag flip an org admin could do themselves (RBAC/self-service candidate), and which mention a hot-swap, MID activation, or DB-level change that genuinely needs a person to validate data — those aren't safely automatable the same way. Split by keyword match on the ticket summary — a rough starting point for PST to sanity-check, not a final classification. Note this universe is scoped to tickets already tagged as "enablement" requests — it does not include the ${fmtNum(dbLevelFT.length)} tickets shown that are filed directly under the separate "DB Level" category (backend/data changes not framed as an enablement ask); those are counted in the Configuration bucket breakdown above, not here.</p>`));
+  const c1c = el('<div class="card"><div id="chart-rbac-split"></div></div>');
+  p.appendChild(c1c);
+  const rbacData = [
+    {label:'RBAC / self-service candidate', value: rbacCandidates.length, color:'var(--series-3)',
+      sub: 'A named flag/module toggle with no data risk — exposable via an admin UI.',
+      onClick: ()=> openDrawer('RBAC / self-service candidates','', rbacCandidates)},
+    {label:'Needs manual DB validation', value: dbValidationNeeded.length, color:'var(--series-other)',
+      sub: 'Hot-swap / DB-level change — needs a human to validate data before/after.',
+      onClick: ()=> openDrawer('Needs manual DB validation','', dbValidationNeeded)},
+  ];
+  if (enablementUniverse.length) {
+    donutChart(c1c.querySelector('#chart-rbac-split'), rbacData, {centerLabel:'enablement tickets'});
+    tableView(c1c, ['Bucket','Tickets','Bugs','Tasks'], rbacData.map(d=>{ const src = d.label.startsWith('RBAC') ? rbacCandidates : dbValidationNeeded; const bt2 = btSplit(src); return [d.label, fmtNum(d.value), fmtNum(bt2.b), fmtNum(bt2.t)]; }));
+  } else { c1c.querySelector('#chart-rbac-split').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No enablement tickets match the current filter.</p>'; }
+  p.appendChild(el(`<div class="callout good"><b>Product ask:</b> ${fmtNum(rbacCandidates.length)} of these (${enablementUniverse.length ? (rbacCandidates.length/enablementUniverse.length*100).toFixed(0) : 0}%) read like clean RBAC/self-service candidates — give org admins the toggle directly instead of routing through PST. The remaining ${fmtNum(dbValidationNeeded.length)} mention a hot-swap, MID activation, or DB-level change and would still need two-level manual validation — not every config ticket can be automated away. Separately, ${fmtNum(dbLevelFT.length)} tickets shown are already filed under "DB Level" rather than as enablement asks — treat the two counts as complementary views of backend-touching work, not one combined total. <span class="clickable" onclick="${h(()=>openDrawer('DB Level tickets','', dbLevelFT))}">View DB Level tickets →</span></div>`));
+}
+registerRenderer(renderConfig);
 
 // ---------------- OPTUM ----------------
-(function(){
-  const p = document.getElementById('panel-optum');
-  const cleanupPct = (D.optum_cleanup_total/D.optum_total*100).toFixed(0);
-  const optumBugs = D.optum_bug_vs_task['Bug']||0, optumTasks = D.optum_bug_vs_task['Task']||0;
+function renderOptum(){
+  const p = document.getElementById('panel-optum'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const monthsList = monthsInRange();
+  const optumFT = FT.filter(t=>t.opt);
+  const cleanupFT = optumFT.filter(t=>t.cln);
+  const allCleanupFT = FT.filter(t=>t.cln);
+  const cleanupPct = optumFT.length ? (cleanupFT.length/optumFT.length*100).toFixed(0) : 0;
+  const bt = btSplit(optumFT);
+
   p.appendChild(el(`<div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
-    <div class="kpi"><div class="label">Optum tickets total</div><div class="value clickable" onclick="${h(()=>openDrawer('Optum tickets','', TICKETS.filter(t=>t.opt)))}">${fmtNum(D.optum_total)}</div><div class="sub">${(D.optum_total/D.total_tickets*100).toFixed(1)}% of all PST tickets</div></div>
-    <div class="kpi"><div class="label">Bugs vs Tasks</div><div class="value"><span class="clickable" onclick="${h(()=>openDrawer('Optum bugs','', TICKETS.filter(t=>t.opt && t.t==='Bug')))}">${fmtNum(optumBugs)}</span> / <span class="clickable" onclick="${h(()=>openDrawer('Optum tasks','', TICKETS.filter(t=>t.opt && t.t==='Task')))}">${fmtNum(optumTasks)}</span></div><div class="sub">bugs / tasks</div></div>
-    <div class="kpi"><div class="label">Cleanup tickets</div><div class="value clickable" onclick="${h(()=>openDrawer('Optum cleanup tickets','', TICKETS.filter(t=>t.opt && t.cln)))}">${fmtNum(D.optum_cleanup_total)}</div><div class="sub">${cleanupPct}% of Optum's own volume</div></div>
-    <div class="kpi"><div class="label">Optum's share of all cleanup</div><div class="value clickable" onclick="${h(()=>openDrawer('All PST cleanup tickets','Optum vs rest', TICKETS.filter(t=>t.cln)))}">${(D.optum_cleanup_total/D.cleanup_total*100).toFixed(0)}%</div><div class="sub">despite being ${(D.optum_total/D.total_tickets*100).toFixed(0)}% of total tickets</div></div>
+    <div class="kpi"><div class="label">Optum tickets total</div><div class="value clickable" onclick="${h(()=>openDrawer('Optum tickets','', optumFT))}">${fmtNum(optumFT.length)}</div><div class="sub">${(optumFT.length/total*100).toFixed(1)}% of shown tickets</div></div>
+    <div class="kpi"><div class="label">Bugs vs Tasks</div><div class="value"><span class="clickable" onclick="${h(()=>openDrawer('Optum bugs','', optumFT.filter(t=>t.t==='Bug')))}">${fmtNum(bt.b)}</span> / <span class="clickable" onclick="${h(()=>openDrawer('Optum tasks','', optumFT.filter(t=>t.t==='Task')))}">${fmtNum(bt.t)}</span></div><div class="sub">bugs / tasks</div></div>
+    <div class="kpi"><div class="label">Cleanup tickets</div><div class="value clickable" onclick="${h(()=>openDrawer('Optum cleanup tickets','', cleanupFT))}">${fmtNum(cleanupFT.length)}</div><div class="sub">${cleanupPct}% of Optum's shown volume</div></div>
+    <div class="kpi"><div class="label">Optum's share of all cleanup</div><div class="value clickable" onclick="${h(()=>openDrawer('All PST cleanup tickets','Optum vs rest', allCleanupFT))}">${allCleanupFT.length ? (cleanupFT.length/allCleanupFT.length*100).toFixed(0) : 0}%</div><div class="sub">despite being ${(optumFT.length/total*100).toFixed(0)}% of shown tickets</div></div>
     <div class="kpi"><div class="label">Cleanup trend</div><div class="value">↓ down ~63%</div><div class="sub">from Feb peak (70/mo) to Jul (27/mo)</div></div>
   </div>`));
 
   p.appendChild(el(`<h2 class="sec-title">Optum: cleanup vs. total tickets, by month</h2>
-  <p class="sec-note">Cleanup is already trending down — from a 70-ticket peak in February to 27 in July.</p>`));
+  <p class="sec-note">Showing: ${filterLabel()}. Cleanup is already trending down — from a 70-ticket peak in February to 27 in July.</p>`));
   const c1 = el('<div class="card"><div id="chart-optum-cleanup"></div></div>');
   p.appendChild(c1);
-  stackedBar(c1.querySelector('#chart-optum-cleanup'), D.months, {
-    'Cleanup': D.months.map(m=>(D.optum_cleanup_trend[m]||{}).cleanup||0),
-    'Other Optum tickets': D.months.map(m=>{const r=D.optum_cleanup_trend[m]||{}; return (r.total||0)-(r.cleanup||0);}),
+  const cleanupByMonth = {}, totalByMonth = {};
+  monthsList.forEach(m=>{ const rows = optumFT.filter(t=>t.m===m); totalByMonth[m]=rows.length; cleanupByMonth[m]=rows.filter(t=>t.cln).length; });
+  stackedBar(c1.querySelector('#chart-optum-cleanup'), monthsList, {
+    'Cleanup': monthsList.map(m=>cleanupByMonth[m]),
+    'Other Optum tickets': monthsList.map(m=>totalByMonth[m]-cleanupByMonth[m]),
   }, {colors:['var(--series-8)','var(--series-1)'],
-    onSegClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'Optum', TICKETS.filter(t=>t.opt && t.m===m && (k==='Cleanup' ? t.cln : !t.cln)))});
-  tableView(c1, ['Month','Cleanup','Total Optum'], D.months.map(m=>{const r=D.optum_cleanup_trend[m]||{}; return [fmtMonth(m), r.cleanup||0, r.total||0];}));
+    onSegClick: (k,i,m)=> openDrawer(`${k} · ${fmtMonth(m)}`,'Optum', optumFT.filter(t=>t.m===m && (k==='Cleanup' ? t.cln : !t.cln)))});
+  tableView(c1, ['Month','Cleanup','Total Optum'], monthsList.map(m=>[fmtMonth(m), cleanupByMonth[m], totalByMonth[m]]));
 
   p.appendChild(el(`<h2 class="sec-title">What Optum's non-cleanup tasks are</h2>`));
   const c2 = el('<div class="card"><div id="chart-optum-tasks"></div></div>');
   p.appendChild(c2);
-  const otData = Object.entries(D.optum_non_cleanup_tasks).map(([label,value])=>{
-    const matched = TICKETS.filter(t=>t.opt && !t.cln && t.tot===label); const bt = btSplit(matched);
-    return {label,value, bt, sub: btNote(matched),
+  const nonCleanup = optumFT.filter(t=>!t.cln);
+  const totCounts = groupCount(nonCleanup, t=>t.tot);
+  const otData = sortedEntries(totCounts).map(([label,value])=>{
+    const matched = nonCleanup.filter(t=>t.tot===label); const bt2 = btSplit(matched);
+    return {label,value, bt:bt2, sub: btNote(matched),
       onClick: ()=> openDrawer(label, 'Optum, non-cleanup', matched)};
   });
-  hbar(c2.querySelector('#chart-optum-tasks'), otData, {color:'var(--series-6)'});
-  tableView(c2, ['Type of task','Tickets','Bugs','Tasks'], otData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t)]));
+  if (otData.length) {
+    hbar(c2.querySelector('#chart-optum-tasks'), otData, {color:'var(--series-6)'});
+    tableView(c2, ['Type of task','Tickets','Bugs','Tasks'], otData.map(d=>[d.label, fmtNum(d.value), fmtNum(d.bt.b), fmtNum(d.bt.t)]));
+  } else { c2.querySelector('#chart-optum-tasks').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No matching tickets in the current filter.</p>'; }
 
-  p.appendChild(el(`<div class="callout good"><b>Recommendation:</b> Optum alone is ${(D.optum_cleanup_total/D.cleanup_total*100).toFixed(0)}% of every cleanup ticket PST handles — fixing its recurring config issues has outsized ROI.</div>`));
-})();
+  p.appendChild(el(`<div class="callout good"><b>Recommendation:</b> Optum alone is ${allCleanupFT.length ? (cleanupFT.length/allCleanupFT.length*100).toFixed(0) : 0}% of every cleanup ticket PST handles in this view — fixing its recurring config issues has outsized ROI.</div>`));
+}
+registerRenderer(renderOptum);
 
 // ---------------- AUTOMATION OPPORTUNITIES ----------------
-(function(){
-  const p = document.getElementById('panel-automation');
+function renderAutomation(){
+  const p = document.getElementById('panel-automation'); p.innerHTML = '';
+  const FT = filteredTickets();
+  const total = FT.length || 1;
+  const monthsList = monthsInRange();
+  const catCounts = groupCount(FT, t=>t.cat);
+  const catSorted = sortedEntries(catCounts).filter(([c])=>!UNCLASSIFIED_CATS.has(c));
+  const top10Candidates = catSorted.slice(0,10).map(([category,catTotal])=>{
+    const monthsActive = monthsList.filter(m=> FT.some(t=>t.cat===category && t.m===m)).length;
+    return { category, total: catTotal, pct_of_all: (catTotal/total*100).toFixed(2),
+      months_active: monthsActive, avg_per_month: monthsList.length ? Math.round(catTotal/monthsList.length*10)/10 : 0 };
+  });
+  const top10Total = top10Candidates.reduce((s,r)=>s+r.total,0);
+  const top10Pct = (top10Total/total*100).toFixed(1);
+
   p.appendChild(el(`<h2 class="sec-title">Top recurring categories, ranked</h2>
-  <p class="sec-note">Steady-state workload, present every month. The top 10 are ${D.top10_candidates_pct}% of all PST tickets.</p>`));
+  <p class="sec-note">Steady-state workload. Showing: ${filterLabel()}. The top 10 are ${top10Pct}% of shown tickets.</p>`));
   const rankGrid = el('<div class="grid2"></div>');
   const c1 = el('<div class="card"></div>');
   const list = document.createElement('ol'); list.className='rank-list';
-  const top10Candidates = D.automation_candidates.slice(0,10);
   top10Candidates.forEach((r,i)=>{
-    const matched = TICKETS.filter(t=>t.cat===r.category);
-    const li = el(`<li class="clickable"><div class="rank-num">${i+1}</div><div class="rank-body"><div class="rank-title">${r.category}</div><div class="rank-meta">${fmtNum(r.total)} tickets (${btNote(matched)}) · active in ${r.months_active}/8 months · avg ${r.avg_per_month}/mo</div></div><div class="rank-pct">${r.pct_of_all}%</div></li>`);
+    const matched = FT.filter(t=>t.cat===r.category);
+    const li = el(`<li class="clickable"><div class="rank-num">${i+1}</div><div class="rank-body"><div class="rank-title">${r.category}</div><div class="rank-meta">${fmtNum(r.total)} tickets (${btNote(matched)}) · active in ${r.months_active}/${monthsList.length||1} months · avg ${r.avg_per_month}/mo</div></div><div class="rank-pct">${r.pct_of_all}%</div></li>`);
     li.addEventListener('click', ()=> openDrawer(r.category, 'category', matched));
     list.appendChild(li);
   });
@@ -1135,8 +1371,8 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   rankGrid.appendChild(c1pie);
   const DONUT_COLORS2 = ['var(--series-1)','var(--series-2)','var(--series-3)','var(--series-4)','var(--series-5)','var(--series-6)','var(--series-7)','var(--series-other)'];
   const rankDonutTop = top10Candidates.slice(0,7).map((r,i)=>({label:r.category, value:r.total, color:DONUT_COLORS2[i],
-    sub:`${r.pct_of_all}% of all tickets · active in ${r.months_active}/8 months`,
-    onClick: ()=> openDrawer(r.category, 'category', TICKETS.filter(t=>t.cat===r.category))}));
+    sub:`${r.pct_of_all}% of shown tickets · active in ${r.months_active}/${monthsList.length||1} months`,
+    onClick: ()=> openDrawer(r.category, 'category', FT.filter(t=>t.cat===r.category))}));
   const rankDonutRest = top10Candidates.slice(7);
   const rankDonutData = rankDonutTop.slice();
   if (rankDonutRest.length) {
@@ -1144,43 +1380,45 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
     const restTotal = rankDonutRest.reduce((s,r)=>s+r.total,0);
     rankDonutData.push({label:`Rest of top 10 (${rankDonutRest.length})`, value: restTotal, color: DONUT_COLORS2[7],
       sub: rankDonutRest.map(r=>r.category).join(', '),
-      onClick: ()=> openDrawer('Rest of top-10 recurring categories', 'category', TICKETS.filter(t=>restSet.has(t.cat)))});
+      onClick: ()=> openDrawer('Rest of top-10 recurring categories', 'category', FT.filter(t=>restSet.has(t.cat)))});
   }
-  donutChart(c1pie.querySelector('#chart-rank-donut'), rankDonutData, {centerLabel:'top-10 tickets'});
+  if (top10Candidates.length) donutChart(c1pie.querySelector('#chart-rank-donut'), rankDonutData, {centerLabel:'top-10 tickets'});
+  else c1pie.querySelector('#chart-rank-donut').innerHTML = '<p style="padding:20px;color:var(--text-muted)">No tickets match the current filter.</p>';
   p.appendChild(rankGrid);
 
   p.appendChild(el(`<h2 class="sec-title">If PST fixes its top recurring categories: a scenario estimate</h2>
-  <p class="sec-note">A conservative, directional estimate — only categories that are structurally self-serve gaps or preventable rework.</p>`));
-  const sc = D.scenario;
+  <p class="sec-note">A conservative, directional estimate — only categories that are structurally self-serve gaps or preventable rework. Reduction assumptions are fixed policy estimates; totals below are recomputed for the current filter.</p>`));
+  const scenario = computeScenario(FT);
   const c2 = el('<div class="card"></div>');
+  const sc = D.scenario;
   const rows = [
-    ['Configuration + Configuration-Tech-Dependent + Feature Enabling', sc.enablement_total, sc.enablement_reduction_pct_assumption, sc.enablement_reduction, 'Admin-facing config/feature-flag UI removes the need to file a ticket at all', ['Configuration','Configuration-Tech Dependent','Feature Enabling']],
-    ['DB Level (manual data ops/cleanup)', sc.dblevel_total, sc.dblevel_reduction_pct_assumption, sc.dblevel_reduction, 'Root-causing the configs that create bad data (Optum already shows ~60% decline is achievable)', ['DB Level']],
-    ['Knowledge-Gap', sc.kgap_total, sc.kgap_reduction_pct_assumption, sc.kgap_reduction, 'In-product guidance/self-serve docs at the point of confusion', ['Knowledge-Gap']],
-    ['Data Request', sc.datareq_total, sc.datareq_reduction_pct_assumption, sc.datareq_reduction, 'Self-serve reporting/log-lookup instead of filing a ticket', ['Data Request']],
+    ['Configuration + Configuration-Tech-Dependent + Feature Enabling', scenario.enablementTotal, sc.enablement_reduction_pct_assumption, scenario.enablementReduction, 'Admin-facing config/feature-flag UI removes the need to file a ticket at all', scenario.enablementSet],
+    ['DB Level (manual data ops/cleanup)', scenario.dbTotal, sc.dblevel_reduction_pct_assumption, scenario.dbReduction, 'Root-causing the configs that create bad data (Optum already shows ~60% decline is achievable)', new Set(['DB Level'])],
+    ['Knowledge-Gap', scenario.kgapTotal, sc.kgap_reduction_pct_assumption, scenario.kgapReduction, 'In-product guidance/self-serve docs at the point of confusion', new Set(['Knowledge-Gap'])],
+    ['Data Request', scenario.datareqTotal, sc.datareq_reduction_pct_assumption, scenario.datareqReduction, 'Self-serve reporting/log-lookup instead of filing a ticket', new Set(['Data Request'])],
   ];
   const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = `<tr><th>Category</th><th class="num">Tickets (8 mo)</th><th class="num">Bugs</th><th class="num">Tasks</th><th class="num">Assumed reduction</th><th class="num">Tickets removed</th><th>Why this is plausible</th></tr>` +
-    rows.map(r=>{const set=new Set(r[5]); const bt=btSplit(TICKETS.filter(t=>set.has(t.cat))); return `<tr><td>${r[0]}</td><td class="num clickable" onclick="${h(()=>openDrawer(r[0],'', TICKETS.filter(t=>set.has(t.cat))))}">${fmtNum(r[1])}</td><td class="num">${fmtNum(bt.b)}</td><td class="num">${fmtNum(bt.t)}</td><td class="num">${r[2]}%</td><td class="num">${fmtNum(r[3])}</td><td style="color:var(--text-secondary);font-size:12.5px">${r[4]}</td></tr>`;}).join('') +
-    `<tr style="font-weight:650"><td>Total</td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num">${fmtNum(sc.total_reduction)}</td><td></td></tr>`;
+  table.innerHTML = `<tr><th>Category</th><th class="num">Tickets (shown)</th><th class="num">Bugs</th><th class="num">Tasks</th><th class="num">Assumed reduction</th><th class="num">Tickets removed</th><th>Why this is plausible</th></tr>` +
+    rows.map(r=>{const set=r[5]; const bt=btSplit(FT.filter(t=>set.has(t.cat))); return `<tr><td>${r[0]}</td><td class="num clickable" onclick="${h(()=>openDrawer(r[0],'', FT.filter(t=>set.has(t.cat))))}">${fmtNum(r[1])}</td><td class="num">${fmtNum(bt.b)}</td><td class="num">${fmtNum(bt.t)}</td><td class="num">${r[2]}%</td><td class="num">${fmtNum(r[3])}</td><td style="color:var(--text-secondary);font-size:12.5px">${r[4]}</td></tr>`;}).join('') +
+    `<tr style="font-weight:650"><td>Total</td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num">${fmtNum(scenario.totalReduction)}</td><td></td></tr>`;
   c2.appendChild(table);
-  c2.appendChild(el(`<div class="callout good" style="margin-top:14px"><b>Bottom line:</b> ~${fmtNum(sc.total_reduction)} tickets — <b>${sc.total_reduction_pct}% of PST's workload</b> — trace to gaps a product change could close. That's roughly ${Math.round(sc.total_reduction/8)} fewer tickets every month.</div>`));
+  c2.appendChild(el(`<div class="callout good" style="margin-top:14px"><b>Bottom line:</b> ~${fmtNum(scenario.totalReduction)} tickets — <b>${scenario.totalReductionPct}% of shown workload</b> — trace to gaps a product change could close. Over ${monthsList.length||1} month${monthsList.length===1?'':'s'} shown, that's roughly ${monthsList.length? Math.round(scenario.totalReduction/monthsList.length): scenario.totalReduction} fewer tickets/month.</div>`));
   p.appendChild(c2);
 
   p.appendChild(el(`<h2 class="sec-title">Recommended priority order</h2>`));
   const c3 = el('<div class="card"></div>');
   const recs = document.createElement('ul'); recs.className='plain-list';
   const items = [
-    ['1. Self-serve config/feature-flag admin UI', `2,174 tickets (35% of volume) — the single largest lever, and the fastest-growing.`,
-      ()=> { const set = new Set(['Configuration','Configuration-Tech Dependent','Feature Enabling']); openDrawer('Configuration + Configuration-Tech Dependent + Feature Enabling','', TICKETS.filter(t=>set.has(t.cat))); }],
-    ['2. Root-cause the top Optum data-quality configs', `Optum is 42% of every cleanup ticket PST files — the July decline shows it's fixable.`,
-      ()=> openDrawer('Optum cleanup tickets','', TICKETS.filter(t=>t.opt && t.cln))],
-    ['3. In-product guidance for the top 3 Knowledge-Gap triggers', `692 tickets exist because the workflow isn't self-explanatory.`,
-      ()=> openDrawer('Knowledge-Gap tickets','', TICKETS.filter(t=>t.cat==='Knowledge-Gap'))],
-    ['4. Self-serve reporting/log access', `320 tickets are PST looking something up on a client's behalf.`,
-      ()=> openDrawer('Data Request tickets','', TICKETS.filter(t=>t.cat==='Data Request'))],
-    ['5. Add config-time validation for "incorrect configuration" bugs', `798 bugs exist only because an invalid setting was allowed to save.`,
-      ()=> openDrawer('Incorrect configuration (config/human error bug)','', TICKETS.filter(t=>t.cfg==='Incorrect configuration (config/human error bug)'))],
+    ['1. Self-serve config/feature-flag admin UI', `${fmtNum(scenario.enablementTotal)} tickets (${(scenario.enablementTotal/total*100).toFixed(0)}% of shown volume) — the single largest lever, and the fastest-growing.`,
+      ()=> openDrawer('Configuration + Configuration-Tech Dependent + Feature Enabling','', FT.filter(t=>scenario.enablementSet.has(t.cat)))],
+    ['2. Root-cause the top Optum data-quality configs', `Optum is a large share of every cleanup ticket PST files in this view — see Optum tab.`,
+      ()=> openDrawer('Optum cleanup tickets','', FT.filter(t=>t.opt && t.cln))],
+    ['3. In-product guidance for the top Knowledge-Gap triggers', `${fmtNum(scenario.kgapTotal)} tickets exist because the workflow isn't self-explanatory.`,
+      ()=> openDrawer('Knowledge-Gap tickets','', FT.filter(t=>t.cat==='Knowledge-Gap'))],
+    ['4. Self-serve reporting/log access', `${fmtNum(scenario.datareqTotal)} tickets are PST looking something up on a client's behalf.`,
+      ()=> openDrawer('Data Request tickets','', FT.filter(t=>t.cat==='Data Request'))],
+    ['5. Add config-time validation for "incorrect configuration" bugs', `${fmtNum(FT.filter(t=>t.cfg==='Incorrect configuration (config/human error bug)').length)} bugs exist only because an invalid setting was allowed to save.`,
+      ()=> openDrawer('Incorrect configuration (config/human error bug)','', FT.filter(t=>t.cfg==='Incorrect configuration (config/human error bug)'))],
   ];
   items.forEach(([t,d,onClick])=>{
     const li = el(`<li class="clickable"><div class="rank-body"><div class="rank-title">${t}</div><div class="rank-meta">${d}</div></div></li>`);
@@ -1189,7 +1427,10 @@ function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(
   });
   c3.appendChild(recs);
   p.appendChild(c3);
-})();
+}
+registerRenderer(renderAutomation);
+
+rerenderAll();
 </script>
 </body>
 </html>
